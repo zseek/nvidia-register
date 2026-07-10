@@ -26,6 +26,12 @@ class DuckMailConfig:
 
 
 @dataclass(frozen=True)
+class MailNestConfig:
+    api_key: str
+    project_code: str
+
+
+@dataclass(frozen=True)
 class CaptchaConfig:
     mode: str
     yescaptcha_client_key: str | None
@@ -55,6 +61,7 @@ class AppConfig:
     email_provider: str
     cloudflare_temp_email: CloudflareTempEmailConfig
     duckmail: DuckMailConfig
+    mailnest_temp_email: MailNestConfig
     captcha: CaptchaConfig
     nvidia: NvidiaConfig
     browser: BrowserConfig
@@ -107,8 +114,7 @@ def init_config() -> None:
     if CONFIG_FILE.exists():
         print(f"Config already exists: {CONFIG_FILE}")
         return
-    template = """
-email_provider = "cloudflare_temp_email"
+    template = """email_provider = "cloudflare_temp_email" # cloudflare_temp_email | duckmail | mailnest_temp_email
 
 [cloudflare_temp_email]
 api_url = ""
@@ -119,6 +125,10 @@ domain = ""
 api_url = "https://api.duckmail.sbs"
 domain = "duckmail.sbs"
 api_key = ""
+
+[mailnest_temp_email]
+api_key = ""
+project_code = "nvidia001"
 
 [captcha]
 mode = "manual" # manual | yescaptcha | captcharun
@@ -153,7 +163,7 @@ def load_config() -> AppConfig:
         data = tomllib.load(file)
 
     email_provider = _get_str(data, "email_provider", "cloudflare_temp_email").lower()
-    if email_provider not in {"cloudflare_temp_email", "duckmail"}:
+    if email_provider not in {"cloudflare_temp_email", "duckmail", "mailnest_temp_email"}:
         raise ValueError(f"Unsupported email_provider: {email_provider}")
 
     use_cloudflare_temp_email = email_provider == "cloudflare_temp_email"
@@ -182,6 +192,9 @@ def load_config() -> AppConfig:
     )
     duckmail_api_key = _get_str(data, "duckmail.api_key", "") or None
 
+    mailnest_api_key = _get_str(data, "mailnest_temp_email.api_key", "")
+    mailnest_project_code = _get_str(data, "mailnest_temp_email.project_code", "")
+
     captcha_mode = _get_str(data, "captcha.mode", "manual").lower()
     if captcha_mode not in {"manual", "yescaptcha", "captcharun"}:
         raise ValueError("captcha.mode must be 'manual', 'yescaptcha' or 'captcharun'")
@@ -203,6 +216,10 @@ def load_config() -> AppConfig:
             api_url=_get_str(data, "duckmail.api_url", "https://api.duckmail.sbs").rstrip("/"),
             domain=duckmail_domain,
             api_key=duckmail_api_key,
+        ),
+        mailnest_temp_email=MailNestConfig(
+            api_key=mailnest_api_key,
+            project_code=mailnest_project_code
         ),
         captcha=CaptchaConfig(
             mode=captcha_mode,
@@ -230,10 +247,14 @@ def describe_config(config: AppConfig) -> None:
     if config.email_provider == "cloudflare_temp_email":
         email_api = config.cloudflare_temp_email.api_url
         email_domain = config.cloudflare_temp_email.domain
-    else:
+    elif config.email_provider == 'duckmail':
         email_api = config.duckmail.api_url
         email_domain = config.duckmail.domain
-
+    elif config.email_provider == 'mailnest_temp_email':
+        email_api = ''
+        email_domain = ''
+    else:
+        raise NotImplementedError()
     print(f"  EMAIL_PROVIDER: {config.email_provider}")
     print(f"  EMAIL_API:      {email_api}")
     print(f"  EMAIL_DOMAIN:   {email_domain}")

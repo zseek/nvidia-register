@@ -8,7 +8,7 @@ from typing import Protocol
 
 import requests
 
-from config import AppConfig, CloudflareTempEmailConfig, DuckMailConfig
+from config import AppConfig, CloudflareTempEmailConfig, DuckMailConfig, MailNestConfig
 
 
 @dataclass(frozen=True)
@@ -143,6 +143,65 @@ class DuckMailProvider:
         return headers
 
 
+class MailNestProvider:
+    def __init__(self, config: MailNestConfig):
+        self.config = config
+        if (not self.config.project_code) or (not self.config.api_key):
+            raise RuntimeError('project_code 与 api_key 是必须的')
+
+    def create_inbox(self, name: str) -> TempEmailInbox:
+        response = requests.post(
+            "https://mailnest.top/api/v1/email/temporary/buy",
+            json={
+                "project_code": self.config.project_code,
+                "count": 1,
+            },
+            headers=self._account_headers(),
+            timeout=15,
+        )
+        if response.status_code == 401:
+            raise Exception('身份验证不通过')
+        resp_json = response.json()
+        if resp_json['code'] != '00000':
+            raise RuntimeError(f"MailNest failed: {resp_json}")
+        return TempEmailInbox(address=resp_json['data'][0]['email'], token='')
+
+    def poll_verification_code(self, inbox: TempEmailInbox, timeout_seconds: int = 180) -> str | None:
+        deadline = time.time() + timeout_seconds
+        email = inbox.address
+        while time.time() < deadline:
+            try:
+                response = requests.post(
+                    f'https://mailnest.top/api/v1/email/receive',
+                    json={
+                        "email": email,
+                    },
+                    headers=self._account_headers(),
+                    timeout=15,
+                )
+                if response.status_code == 401:
+                    raise Exception('身份验证不通过')
+                resp_json = response.json()
+                if resp_json['code'] != '00000':
+                    raise RuntimeError(f"MailNest failed: {resp_json}")
+                if not resp_json['data']:
+                    time.sleep(2)
+                    continue
+                code = _extract_verification_code(resp_json['data'][0]['body'])
+                if code:
+                    return code
+            except Exception as exc:
+                print(f"  email poll: {exc}", flush=True)
+            time.sleep(2)
+        return None
+
+    def _account_headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        return headers
+
+
 def _extract_verification_code(raw_message: str) -> str | None:
     clean = re.sub(r"=\r?\n", "", raw_message)
     index = clean.lower().find("verification code")
@@ -179,4 +238,6 @@ def build_email_provider(config: AppConfig) -> TempEmailProvider:
         return CloudflareTempEmailProvider(config.cloudflare_temp_email)
     if config.email_provider == "duckmail":
         return DuckMailProvider(config.duckmail)
+    if config.email_provider == "mailnest_temp_email":
+        return MailNestProvider(config.mailnest_temp_email)
     raise ValueError(f"Unsupported email provider: {config.email_provider}")
