@@ -7,7 +7,7 @@
 - **全自动流程**：创建临时邮箱 → 注册 → 过验证码 → 创建组织 → 建 Key → 记录 CSV，全流程自动化
 - **批量注册**：支持单次注册多个账号，交互式询问或 `-n` 参数直接指定
 - **验证码**：支持 手动过验证(`manual`)和全自动过验证(`yescaptcha`、`captcharun`)两种hCaptcha 处理方式
-- **邮箱服务**：支持 `cloudflare_temp_email`（自部署）和 `duckmail`（DuckMail API）
+- **邮箱服务**：支持 `cloudflare_temp_email`（自部署）、 `duckmail`（DuckMail API）和 `mailnest`（Outlook 临时邮箱）
 - **随机密码**：每次注册自动生成 12 位密码（大小写 + 数字）
 - **自动跳过手机验证**：利用组织名注册跳过手机号要求，并创建长效 API Key
 - **CSV 记录**：每次注册成功立即追加 `email,password,apikey` 到 CSV 文件
@@ -67,6 +67,10 @@ domain = "your-domain.com"
 api_url = "https://api.duckmail.sbs"
 domain = "duckmail.sbs"
 api_key = ""
+
+[mailnest_temp_email]
+api_key = ""
+project_code = "nvidia001"
 
 [captcha]
 mode = "manual" # manual | yescaptcha | captcharun

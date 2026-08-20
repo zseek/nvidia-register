@@ -1,4 +1,4 @@
-email_provider = "cloudflare_temp_email" # cloudflare_temp_email | duckmail
+email_provider = "cloudflare_temp_email" # cloudflare_temp_email | duckmail | mailnest_temp_email
 
 [cloudflare_temp_email]
 api_url = ""
@@ -9,6 +9,10 @@ domain = ""
 api_url = "https://api.duckmail.sbs"
 domain = "duckmail.sbs"
 api_key = ""
+
+[mailnest_temp_email]
+api_key = ""
+project_code = "nvidia001"
 
 [captcha]
 mode = "manual" # manual | yescaptcha | captcharun
