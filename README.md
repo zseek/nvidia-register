@@ -26,12 +26,16 @@
 └── config.toml.example  # 配置示例
 ```
 
+
+
 ## 前置条件
 
 - Python 3.11+
 - Chromium 浏览器（Playwright 自动下载）
 - **临时邮箱服务**（当前支持 `cloudflare_temp_email` 自部署 和 `duckmail`）
-- （可选）[YesCaptcha](https://yescaptcha.com/i/57yzUt) / [CaptchaRun](https://captcha-run.com/sso?inviter=ad8fbc2f-9721-430e-87a9-1898fa0177b4) 密钥（用于全自动过 hCaptcha）
+- （可选）[YesCaptcha](https://yescaptcha.com/i/57yzUt)（推荐） / [CaptchaRun](https://captcha-run.com/sso?inviter=ad8fbc2f-9721-430e-87a9-1898fa0177b4) 密钥（用于全自动过 hCaptcha）
+
+
 
 ## 安装
 
@@ -39,6 +43,8 @@
 pip install -r requirements.txt
 playwright install chromium
 ```
+
+
 
 ## 配置
 
@@ -86,30 +92,32 @@ headless = false
 close_delay_seconds = 5
 ```
 
-| 配置项 | 说明                                                                              |
-|--------|---------------------------------------------------------------------------------|
-| `email_provider` | 临时邮箱服务类型（支持 `cloudflare_temp_email` / `duckmail`）                               |
-| `cloudflare_temp_email.api_url` | 邮箱服务 API 地址                                                                     |
-| `cloudflare_temp_email.admin_auth` | 邮箱服务管理员密钥                                                                       |
-| `cloudflare_temp_email.domain` | 邮箱域名                                                                            |
-| `duckmail.api_url` | DuckMail API 地址（默认 `https://api.duckmail.sbs`）                                  |
-| `duckmail.domain` | DuckMail 邮箱域名，例如 `duckmail.sbs` 或你的私有域名                                         |
-| `duckmail.api_key` | DuckMail 私有域 API Key，使用公共域名时可留空                                                 |
-| `mailnest_temp_email.api_key` | MailNest 的 API Key，获取页面 `https://mailnest.top/account`                          |
-| `mailnest_temp_email.project_code` | MailNest 中英伟达的项目代码，默认为 `nvidia001`，可以直接使用。获取页面 `https://mailnest.top/buy-email` |
-| `captcha.mode` | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API，`captcharun` 使用 CaptchaRun API    |
-| `captcha.yescaptcha_client_key` | YesCaptcha 客户端密钥（mode=yescaptcha 时必填）                                           |
-| `captcha.yescaptcha_api_url` | YesCaptcha API 地址（默认 `https://api.yescaptcha.com`）                              |
-| `captcha.captcharun_token` | CaptchaRun Authorization Token（mode=captcharun 时必填）                             |
-| `captcha.captcharun_api_url` | CaptchaRun API 地址（默认 `https://api.captcha-run.com`）                             |
-| `captcha.poll_interval_seconds` | 验证码结果轮询间隔（秒）                                                                    |
-| `captcha.timeout_seconds` | 验证码等待超时时间（秒）                                                                    |
-| `nvidia.output_csv` | 记录输出 CSV 文件路径                                                                   |
-| `nvidia.key_name` | API Key 名称                                                                      |
-| `nvidia.account_name` | 创建组织账户时填入的名称（用于跳过手机验证）                                                          |
-| `nvidia.key_expiry_date` | API Key 过期时间（默认 ~100 年）                                                         |
-| `browser.headless` | 是否无头模式运行浏览器                                                                     |
-| `browser.close_delay_seconds` | 完成后浏览器关闭延迟秒数                                                                    |
+
+| 配置项                                | 说明                                                                           |
+| ---------------------------------- | ---------------------------------------------------------------------------- |
+| `email_provider`                   | 临时邮箱服务类型（支持 `cloudflare_temp_email` / `duckmail`）                            |
+| `cloudflare_temp_email.api_url`    | 邮箱服务 API 地址                                                                  |
+| `cloudflare_temp_email.admin_auth` | 邮箱服务管理员密钥                                                                    |
+| `cloudflare_temp_email.domain`     | 邮箱域名                                                                         |
+| `duckmail.api_url`                 | DuckMail API 地址（默认 `https://api.duckmail.sbs`）                               |
+| `duckmail.domain`                  | DuckMail 邮箱域名，例如 `duckmail.sbs` 或你的私有域名                                      |
+| `duckmail.api_key`                 | DuckMail 私有域 API Key，使用公共域名时可留空                                              |
+| `captcha.mode`                     | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API，`captcharun` 使用 CaptchaRun API |
+| `captcha.yescaptcha_client_key`    | YesCaptcha 客户端密钥（mode=yescaptcha 时必填）                                        |
+| `captcha.yescaptcha_api_url`       | YesCaptcha API 地址（默认 `https://api.yescaptcha.com`）                           |
+| `captcha.captcharun_token`         | CaptchaRun Authorization Token（mode=captcharun 时必填）                          |
+| `captcha.captcharun_api_url`       | CaptchaRun API 地址（默认 `https://api.captcha-run.com`）                          |
+| `captcha.poll_interval_seconds`    | 验证码结果轮询间隔（秒）                                                                 |
+| `captcha.timeout_seconds`          | 验证码等待超时时间（秒）                                                                 |
+| `nvidia.output_csv`                | 记录输出 CSV 文件路径                                                                |
+| `nvidia.key_name`                  | API Key 名称                                                                   |
+| `nvidia.account_name`              | 创建组织账户时填入的名称（用于跳过手机验证）                                                       |
+| `nvidia.key_expiry_date`           | API Key 过期时间（默认 ~100 年）                                                      |
+| `browser.headless`                 | 是否无头模式运行浏览器                                                                  |
+| `browser.close_delay_seconds`      | 完成后浏览器关闭延迟秒数                                                                 |
+
+
+
 
 ## 使用
 
@@ -131,6 +139,8 @@ email,password,apikey
 nv12345678@your-domain.com,aB3dE5fG7hI9,nvapi-xxxx...
 ```
 
+
+
 ## 注册流程
 
 ```
@@ -138,6 +148,8 @@ build.nvidia.com (填邮箱) → login.nvgs.nvidia.com (填密码 + hCaptcha)
 → 验证码页 (键盘输入) → 同意页 (提交) → 创建组织 (跳过手机验证)
 → NGC API (建 Key) → CSV 记录
 ```
+
+
 
 ## 扩展邮箱服务
 
@@ -158,3 +170,4 @@ class TempEmailProvider(Protocol):
 - 浏览器窗口会在完成后自动关闭（可配置延迟）
 - 批量注册时每个账号独立浏览器会话，互不影响
 - 第二次 `Ctrl+C` 强制退出
+

@@ -81,12 +81,19 @@ class YesCaptchaSolver:
     def _poll_task_result(self, task_id: str) -> str | None:
         deadline = time.time() + self.timeout_seconds
         while time.time() < deadline:
-            response = requests.post(
-                f"{self.api_url}/getTaskResult",
-                json={"clientKey": self.client_key, "taskId": task_id},
-                timeout=30,
-            )
-            data = response.json()
+            try:
+                response = requests.post(
+                    f"{self.api_url}/getTaskResult",
+                    json={"clientKey": self.client_key, "taskId": task_id},
+                    timeout=30,
+                )
+                data = response.json()
+            except requests.RequestException as exc:
+                # 网络抖动不该让整个任务失败，继续轮询到超时为止
+                print(f"  YesCaptcha getTaskResult network error: {exc}")
+                time.sleep(self.poll_interval_seconds)
+                continue
+
             if data.get("errorId"):
                 print(f"  YesCaptcha getTaskResult failed: {data}")
                 return None
@@ -233,23 +240,45 @@ async def _get_site_key(page: Page) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-async def _inject_hcaptcha_token(page: Page, token: str) -> None:
+async def _inject_hcaptcha_token(page: Page, token: str) -> bool:
     """调用拦截的 __hCaptchaCallback 触发 Angular onSuccess，使 #register_button enable。
 
     回调由 main.py 的 _ensure_hcaptcha_hook 通过 addInitScript 在
     hcaptcha.render 调用时捕获到 window.__hCaptchaCallback。
+
+    同时把 token 写进 h-captcha-response 隐藏域并置 __hCaptchaInjectedToken 标记，
+    后者会让 hook 屏蔽掉 hCaptcha 组件自身失败触发的 expired/error 回调，
+    避免刚注入的 token 又被 Angular 清掉。
     """
     result = await page.evaluate(
         r"""(token) => {
+            window.__hCaptchaInjectedToken = token;
+
+            // 隐藏域：部分实现在提交时直接读表单值
+            let textareaCount = 0;
+            for (const name of ['h-captcha-response', 'g-recaptcha-response']) {
+                for (const field of document.querySelectorAll(`textarea[name="${name}"]`)) {
+                    field.value = token;
+                    field.dispatchEvent(new Event('input', {bubbles: true}));
+                    field.dispatchEvent(new Event('change', {bubbles: true}));
+                    textareaCount += 1;
+                }
+            }
+
+            let callbackInvoked = false;
             if (typeof window.__hCaptchaCallback === 'function') {
                 window.__hCaptchaCallback(token);
-                return true;
+                callbackInvoked = true;
             }
-            return false;
+            return {callbackInvoked, textareaCount};
         }""",
         token,
     )
-    print(f"  callback called: {result}")
+    callback_invoked = bool(result.get("callbackInvoked"))
+    print(f"  token injected (callback={callback_invoked}, textarea={result.get('textareaCount')})")
+    if not callback_invoked:
+        print("  WARNING: __hCaptchaCallback 未捕获到，Angular 可能收不到 token")
+    return callback_invoked
 
 
 # ---------------------------------------------------------------------------

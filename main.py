@@ -4,7 +4,7 @@ nvidia-register — 注册 build.nvidia.com 账号并创建 AI_PLAYGROUNDS_KEY
 
 完整流程（基于真实页面链路，全部实测确认）：
   创建临时邮箱 → build.nvidia.com 填邮箱 → create-account 页填密码 + 过 hCaptcha
-  → 验证码页真实键盘输入 → 同意/快完成页 → (session 丢失) 邮箱+密码重新登录
+  → 验证码页真实键盘输入 → 跳过通行密钥引导页 → 同意/快完成页
   → 创建组织跳过手机验证 → 调 NGC API 建 key → 记录到 CSV
 
 用法:
@@ -200,7 +200,7 @@ async def _register_one(
             return None
 
         # 6. 状态机处理注册后跳转，直到 session 有效并建 key
-        api_key = await finalize_and_create_key(page, inbox, password, config)
+        api_key = await finalize_and_create_key(page, config)
 
         # 7. 记录到 CSV
         if api_key:
@@ -339,29 +339,19 @@ async def register_account(
         pass
     print("  password OK")
 
-    # [2/4] 过 hCaptcha（token 到位后 #register_button 才 enable）
-    if not await captcha_solver.solve(page):
-        print("  Captcha failed")
+    # [2/4] 过 hCaptcha 并提交。token 被后端拒绝时页面只弹一个笼统的错误提示
+    # （表现为“网络问题”），仍停在 create-account 页，所以这里换一个新 token 重试。
+    if not await _solve_captcha_and_submit(page, captcha_solver, config):
         return False
 
-    print("\n[2/4] Submit registration (#register_button)...")
-    register_btn = page.locator("#register_button")
-    try:
-        await register_btn.wait_for(state="visible", timeout=15000)
-        # 等待按钮 enable（token 生效后）
-        for _ in range(30):
-            if await register_btn.is_enabled():
-                break
-            await asyncio.sleep(1)
-        await register_btn.click()
-    except Exception as exc:
-        print(f"  #register_button not clickable: {exc}")
-        await _print_clickable_snapshot(page)
-        return False
-
-    # [3/4] 等待验证码邮件
+    # [3/4] 等待验证码邮件。同步轮询放到线程里跑，否则会阻塞事件循环，
+    # 让 Playwright 在长达 timeout_seconds 的时间内无法处理页面事件。
     print("\n[3/4] Waiting for verification code email...")
-    code = email_provider.poll_verification_code(inbox, timeout_seconds=config.captcha.timeout_seconds)
+    code = await asyncio.to_thread(
+        email_provider.poll_verification_code,
+        inbox,
+        config.captcha.timeout_seconds,
+    )
     if not code:
         print("  No verification code received")
         return False
@@ -374,16 +364,156 @@ async def register_account(
         return False
 
     # [4/4] 真实键盘输入验证码（React 受控组件，JS setValue 无效）
+    # 验证码可能过期或输错，检测到错误提示时请求新验证码并重试
     print("\n[4/4] Type verification code...")
-    if not await _type_verification_code(page, code):
-        print("  failed to type verification code")
-        return False
+    for code_attempt in range(1, VERIFICATION_CODE_ATTEMPTS + 1):
+        if code_attempt > 1:
+            print(f"\n  请求新验证码... (第 {code_attempt}/{VERIFICATION_CODE_ATTEMPTS} 次)")
+            if not await _request_new_verification_code(page):
+                print("  无法请求新验证码")
+                return False
 
-    # 点“继续”提交验证码
-    await _click_continue(page)
-    await asyncio.sleep(3)
-    print("\nRegistration submitted!")
-    return True
+            code = await asyncio.to_thread(
+                email_provider.poll_verification_code,
+                inbox,
+                config.captcha.timeout_seconds,
+            )
+            if not code:
+                print("  未收到新验证码")
+                return False
+            print(f"  新验证码: {code}")
+
+        if not await _type_verification_code(page, code):
+            print("  failed to type verification code")
+            return False
+
+        # 点"继续"提交验证码
+        await _click_continue(page)
+        await asyncio.sleep(3)
+
+        # 检查是否有错误提示（验证码无效）
+        if await _has_verification_code_error(page):
+            print("  验证码无效，需要重新请求")
+            continue
+
+        # 验证码通过后 NVIDIA 会插入"创建通行密钥"引导页，先跳过它
+        await _skip_passkey_prompt_if_present(page)
+        print("\nRegistration submitted!")
+        return True
+
+    print("  验证码尝试次数已用尽")
+    return False
+
+# hCaptcha token 被后端拒绝时的重试次数（每次都会重新求解一个新 token）
+CAPTCHA_SUBMIT_ATTEMPTS = 3
+VERIFICATION_CODE_ATTEMPTS = 3
+
+async def _solve_captcha_and_submit(page: Page, captcha_solver, config: AppConfig) -> bool:
+    """过 hCaptcha 并点 #register_button，直到后端受理注册。
+
+    NVIDIA 的注册接口是 POST /api/1/frontend/oauth/user/register，请求体里带
+    validation.response（hCaptcha token）。token 校验不通过时接口返回非 2xx，
+    前端只弹一个笼统的错误提示（看起来像网络问题），页面仍停在 create-account。
+    这里直接监听该接口的状态码来判定成败，失败就换新 token 重来。
+    """
+    for attempt in range(1, CAPTCHA_SUBMIT_ATTEMPTS + 1):
+        if attempt > 1:
+            print(f"\n  重新求解 hCaptcha 并重试提交 (第 {attempt}/{CAPTCHA_SUBMIT_ATTEMPTS} 次)...")
+            await _reset_hcaptcha_widget(page)
+
+        try:
+            solved = await captcha_solver.solve(page)
+        except Exception as exc:
+            # 打码平台不可用（网络超时、额度耗尽等）只应让当前账号失败
+            print(f"  Captcha solver error: {exc}")
+            solved = False
+        if not solved:
+            print("  Captcha failed")
+            continue
+
+        print(f"\n[2/4] Submit registration (#register_button)... (attempt {attempt})")
+        register_result = await _click_register_and_wait_result(page)
+
+        if register_result == "accepted":
+            return True
+        if register_result == "email_exists":
+            # 邮箱已被占用，换 token 也没用
+            print("  该邮箱已注册，放弃当前账号")
+            return False
+        print(f"  注册提交未被受理 ({register_result})")
+
+    print(f"  连续 {CAPTCHA_SUBMIT_ATTEMPTS} 次提交均失败")
+    await _print_clickable_snapshot(page)
+    return False
+
+async def _click_register_and_wait_result(page: Page) -> str:
+    """点 #register_button 并等 user/register 接口响应，返回判定结果。
+
+    返回值: "accepted" | "email_exists" | "rejected" | "no_response" | "not_clickable"
+    """
+    register_btn = page.locator("#register_button")
+    try:
+        await register_btn.wait_for(state="visible", timeout=15000)
+        for _ in range(30):
+            if await register_btn.is_enabled():
+                break
+            await asyncio.sleep(1)
+        else:
+            return "not_clickable"
+    except Exception as exc:
+        print(f"  #register_button not clickable: {exc}")
+        return "not_clickable"
+
+    # 先挂上等待器再点击，避免响应比监听更快
+    response_waiter = asyncio.create_task(_wait_for_register_response(page))
+    try:
+        await register_btn.click()
+    except Exception as exc:
+        response_waiter.cancel()
+        print(f"  #register_button click failed: {exc}")
+        return "not_clickable"
+
+    return await response_waiter
+
+async def _wait_for_register_response(page: Page, timeout_seconds: int = 45) -> str:
+    """等 POST .../oauth/user/register 的响应，按状态码判定注册是否被受理。"""
+    try:
+        response = await page.wait_for_event(
+            "response",
+            predicate=lambda resp: "oauth/user/register" in resp.url and resp.request.method == "POST",
+            timeout=timeout_seconds * 1000,
+        )
+    except Exception:
+        return "no_response"
+
+    if response.status in (200, 201, 204):
+        print(f"  register accepted ({response.status})")
+        return "accepted"
+
+    body = ""
+    try:
+        body = (await response.text())[:300]
+    except Exception:
+        pass
+    print(f"  register rejected ({response.status}): {body}")
+    if "CONFLICT" in body or "ALREADY" in body.upper():
+        return "email_exists"
+    return "rejected"
+
+async def _reset_hcaptcha_widget(page: Page) -> None:
+    """清掉上一次注入的 token 并重置 hCaptcha 组件，以便注入新 token。"""
+    try:
+        await page.evaluate(
+            """() => {
+                window.__hCaptchaInjectedToken = null;
+                if (window.hcaptcha && typeof window.hcaptcha.reset === 'function') {
+                    try { window.hcaptcha.reset(); } catch (_) {}
+                }
+            }"""
+        )
+    except Exception:
+        pass
+    await asyncio.sleep(2)
 
 async def _wait_for_verification_inputs(page: Page, timeout_seconds: int) -> bool:
     """等待 6 个验证码数字输入框出现。"""
@@ -414,17 +544,137 @@ async def _type_verification_code(page: Page, code: str) -> bool:
     return True
 
 async def _click_continue(page: Page) -> bool:
-    """点验证码/同意页的主推进按钮（继续 / 提交）。"""
-    for name in ("继续", "提交"):
+    """点验证码/同意页的主推进按钮。
+
+    页面语言随 locale 变化，所以中英文名称都试一遍。
+    """
+    clicked = await _click_button_by_names(page, ("继续", "提交", "Continue", "Submit"))
+    if clicked:
+        print(f"  clicked [{clicked}]")
+        return True
+    return False
+
+async def _click_button_by_names(page: Page, names: tuple[str, ...], timeout_ms: int = 5000) -> str | None:
+    """按可访问名依次尝试点击可见且可用的按钮，返回命中的名称。"""
+    for name in names:
         try:
-            btn = page.get_by_role("button", name=name).first
-            if await btn.count() > 0 and await btn.is_enabled():
-                await btn.click(timeout=5000)
-                print(f"  clicked [{name}]")
-                return True
+            button = page.get_by_role("button", name=name).filter(visible=True).first
+            if await button.count() > 0 and await button.is_enabled():
+                await button.click(timeout=timeout_ms)
+                return name
         except Exception:
             continue
+    return None
+
+# 跳过通行密钥的二次确认对话框上的"确定"按钮
+_CONFIRM_BUTTON_NAMES = ("确定", "OK", "Confirm", "Yes", "是")
+
+async def _confirm_skip_dialog(page: Page) -> bool:
+    """点掉"确定要跳过设置通行密钥吗"确认对话框。"""
+    for _ in range(10):
+        clicked = await _click_button_by_names(page, _CONFIRM_BUTTON_NAMES, timeout_ms=3000)
+        if clicked:
+            print(f"  passkey 确认对话框：已点击 [{clicked}]")
+            return True
+        await asyncio.sleep(0.5)
     return False
+
+async def _has_verification_code_error(page: Page) -> bool:
+    """检测页面上是否显示"验证码无效"的错误提示。"""
+    try:
+        # 检测错误提示文字（中英文）
+        error_texts = ["验证码无效", "验证码错误", "invalid code", "incorrect code", "code is invalid"]
+        for text in error_texts:
+            if await page.get_by_text(text, exact=False).count() > 0:
+                return True
+        return False
+    except Exception:
+        return False
+
+async def _request_new_verification_code(page: Page) -> bool:
+    """点击"请求新验证码"或"重新请求新验证码"链接。"""
+    try:
+        # 尝试中英文链接文字
+        link_texts = ["请求新验证码", "重新请求新验证码", "request new code", "resend code"]
+        for text in link_texts:
+            link = page.get_by_text(text, exact=False).filter(visible=True).first
+            if await link.count() > 0:
+                await link.click(timeout=5000)
+                print(f"  已点击 [{text}]")
+                await asyncio.sleep(2)
+                return True
+        return False
+    except Exception as exc:
+        print(f"  点击请求新验证码失败: {exc}")
+        return False
+
+async def _skip_passkey_prompt(page: Page) -> bool:
+    """跳过"创建通行密钥"引导页（/v1/passkey/prompt-setup）。
+
+    NVIDIA 在邮箱验证之后新增了这一步，页面上有两个按钮：
+      #cancelSetupSelect_btn  → "稍后再说"（我们要点的）
+      #setUpPasskey_btn       → "立即创建"（会拉起 WebAuthn，自动化环境无法完成）
+
+    点"稍后再说"之后还会弹一个确认对话框（"您确定要跳过设置通行密钥吗？"），
+    必须再点"确定"才会真正离开该页。
+    """
+    try:
+        skip_btn = page.locator("#cancelSetupSelect_btn")
+        if await skip_btn.count() > 0:
+            await skip_btn.first.click(timeout=5000)
+            print("  passkey 引导页：已点击 [稍后再说]")
+            await _confirm_skip_dialog(page)
+            return True
+    except Exception:
+        pass
+
+    clicked = await _click_button_by_names(page, ("稍后再说", "Maybe later", "Not now", "Skip"))
+    if clicked:
+        print(f"  passkey 引导页：已点击 [{clicked}]")
+        await _confirm_skip_dialog(page)
+        return True
+
+    print("  passkey 引导页：未找到跳过按钮")
+    await _print_clickable_snapshot(page)
+    return False
+
+async def _skip_passkey_prompt_if_present(page: Page, wait_seconds: int = 15) -> bool:
+    """等待并跳过可能出现的通行密钥引导页。没出现就直接返回。"""
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        if "passkey" in page.url:
+            return await _skip_passkey_prompt(page)
+        await asyncio.sleep(1)
+    return False
+
+async def _wait_for_url_change(page: Page, current_url: str, wait_seconds: int) -> bool:
+    """等页面自行跳走。返回 True 表示 URL 已变化。"""
+    deadline = time.time() + wait_seconds
+    while time.time() < deadline:
+        await asyncio.sleep(1)
+        if page.url != current_url:
+            return True
+    return False
+
+async def _recover_from_navigation_error(page: Page) -> bool:
+    """从 chrome-error 页恢复：先试重新加载，再退回 build.nvidia.com。
+
+    此时账号已注册且 session cookie 已在浏览器里，重新打开站点即可让
+    NGC 的 user-context 探测重新生效，不需要重新登录。
+    """
+    try:
+        await page.reload(wait_until="domcontentloaded", timeout=30000)
+        if not page.url.startswith("chrome-error"):
+            return True
+    except Exception:
+        pass
+
+    try:
+        await page.goto("https://build.nvidia.com/", wait_until="domcontentloaded", timeout=60000)
+        return not page.url.startswith("chrome-error")
+    except Exception as exc:
+        print(f"  恢复导航失败: {exc}")
+        return False
 
 async def _ensure_hcaptcha_hook(page: Page) -> None:
     """用 page.add_init_script 在所有后续页面加载前注册 hCaptcha 拦截器。
@@ -433,9 +683,25 @@ async def _ensure_hcaptcha_hook(page: Page) -> None:
     hcaptcha.render(el, {callback: onSuccess})。hcaptcha.render 内部存储回调。
     必须在 hCaptcha API 脚本创建 window.hcaptcha 时拦截，包装 render 方法，
     在回调注册时捕获到 window.__hCaptchaCallback。
+
+    自动化浏览器里 hCaptcha 自身的挑战常常失败（组件显示"请再试一次"），
+    随后会触发 expired-callback / error-callback，让 Angular 清掉我们注入的
+    token 并重新禁用 #register_button。这里把这两个回调拦下来：token 注入后
+    不再让它们生效，同时让 getResponse() 返回注入的 token，保证 Angular 在
+    提交时读到的是有效值。
     """
     await page.add_init_script(
         r"""(() => {
+            window.__hCaptchaInjectedToken = null;
+
+            const suppressWhenInjected = (originalCallback, callbackName) => function(...args) {
+                if (window.__hCaptchaInjectedToken) {
+                    console.debug('[hook] suppressed hCaptcha ' + callbackName);
+                    return undefined;
+                }
+                return originalCallback.apply(this, args);
+            };
+
             // 拦截 hCaptcha API 脚本创建 window.hcaptcha 对象
             let _realHcaptcha = null;
             Object.defineProperty(window, 'hcaptcha', {
@@ -444,13 +710,42 @@ async def _ensure_hcaptcha_hook(page: Page) -> None:
                 get() { return _realHcaptcha; },
                 set(val) {
                     _realHcaptcha = val;
-                    if (val && typeof val.render === 'function') {
+                    if (!val) { return; }
+
+                    if (typeof val.render === 'function') {
                         const origRender = val.render.bind(val);
                         val.render = function(el, opts) {
                             if (opts && typeof opts.callback === 'function') {
                                 window.__hCaptchaCallback = opts.callback;
                             }
+                            // 组件自身挑战失败时不允许清掉已注入的 token
+                            if (opts && typeof opts['expired-callback'] === 'function') {
+                                opts['expired-callback'] = suppressWhenInjected(
+                                    opts['expired-callback'], 'expired-callback'
+                                );
+                            }
+                            if (opts && typeof opts['error-callback'] === 'function') {
+                                opts['error-callback'] = suppressWhenInjected(
+                                    opts['error-callback'], 'error-callback'
+                                );
+                            }
+                            if (opts && typeof opts['chalexpired-callback'] === 'function') {
+                                opts['chalexpired-callback'] = suppressWhenInjected(
+                                    opts['chalexpired-callback'], 'chalexpired-callback'
+                                );
+                            }
                             return origRender(el, opts);
+                        };
+                    }
+
+                    // Angular 提交前可能改用 getResponse() 取值
+                    if (typeof val.getResponse === 'function') {
+                        const origGetResponse = val.getResponse.bind(val);
+                        val.getResponse = function(...args) {
+                            if (window.__hCaptchaInjectedToken) {
+                                return window.__hCaptchaInjectedToken;
+                            }
+                            return origGetResponse(...args);
                         };
                     }
                 }
@@ -476,17 +771,13 @@ async def _print_clickable_snapshot(page: Page) -> None:
 #  阶段 C：注册后跳转 + 建 key
 # ---------------------------------------------------------------------------
 
-async def finalize_and_create_key(
-    page: Page,
-    inbox,
-    password: str,
-    config: AppConfig,
-) -> str | None:
+async def finalize_and_create_key(page: Page, config: AppConfig) -> str | None:
     """注册提交后依次处理页面跳转，直到 session 有效并建 key。
 
     真实跳转链（实测确认）：
-      验证码提交 → signin-redirect → consent 页(点"提交")
-      → select-account(填组织名) → complete-profile(session 已有效, 直接建 key)
+      验证码提交 → passkey/prompt-setup 页(点"稍后再说") → signin-redirect
+      → consent 页(点"提交") → select-account(填组织名)
+      → complete-profile(session 已有效, 直接建 key)
     """
     print("\n[阶段C] 处理注册后跳转，直到 session 有效...")
     deadline = time.time() + 240
@@ -503,6 +794,24 @@ async def finalize_and_create_key(
         if url_now != last_url:
             print(f"  当前页面: {url_now[:90]}")
             last_url = url_now
+
+        # 跳转链中某一跳加载失败会停在 chrome-error 页，只能重新导航把流程接回去
+        if url_now.startswith("chrome-error"):
+            print("  页面加载失败，重新打开 build.nvidia.com 以恢复流程...")
+            if not await _recover_from_navigation_error(page):
+                await asyncio.sleep(3)
+            last_url = ""
+            continue
+
+        # 通行密钥引导页 → 点"稍后再说"跳过。
+        # 跳过动作已在 register_account 里做过，此处 URL 可能只是还没来得及跳转，
+        # 所以先给它一点时间自行离开，避免重复点击与无意义的告警。
+        if "passkey" in url_now:
+            if await _wait_for_url_change(page, url_now, wait_seconds=5):
+                continue
+            await _skip_passkey_prompt(page)
+            await asyncio.sleep(3)
+            continue
 
         # 创建组织页（利用组织名跳过手机验证）
         if "select-account" in url_now or "cloudaccounts.nvidia.com" in url_now:
